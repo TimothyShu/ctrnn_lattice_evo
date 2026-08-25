@@ -1,0 +1,17 @@
+# pyproject.toml
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ctrnn-lattice-evo"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["jax", "numpy", "networkx"]
+
+[tool.setuptools.packages.find]
+include = ["ctrnn_lattice_evo*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
