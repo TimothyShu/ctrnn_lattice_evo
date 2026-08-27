@@ -132,6 +132,17 @@ class Config:
     # ── Derived ──────────────────────────────────────────────────────────────
     n_in: int = field(init=False)
 
+    # ── Only for Sparse ──────────────────────────────────────────────────────
+    # Node operators — only meaningful for the sparse arm, whose identity is
+    # "start small and grow".  On a full lattice add_node self-disables (no
+    # free slots) and remove_node would punch holes in the substrate under
+    # study, so this is enforced rather than left to the runner to remember.
+    #
+    # Enabling it means the grid-vs-sparse contrast differs in node dynamics
+    # as well as placement and density — a whole-approach comparison, not a
+    # single-variable one.  grid-vs-uniform stays controlled either way.
+    node_ops_enabled: bool = False
+
     # ─────────────────────────────────────────────────────────────────────────
 
     def __post_init__(self):
@@ -187,6 +198,11 @@ class Config:
         if not (0 < self.sparse_n_active <= self.N_max):
             raise ValueError(
                 f"sparse_n_active ({self.sparse_n_active}) must be in (0, N_max]"
+            )
+        if self.node_ops_enabled and self.init_mode != "sparse":
+            raise ValueError(
+                f"node_ops_enabled requires init_mode='sparse', got "
+                f"{self.init_mode!r} — remove_node would deactivate lattice sites"
             )
 
     def _validate_io(self):
