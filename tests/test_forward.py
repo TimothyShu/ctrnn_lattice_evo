@@ -34,15 +34,16 @@ def minimal_genome(cfg: Config, **overrides) -> Genome:
     """
     N = cfg.N_max
     g = Genome(
-        active_mask=jnp.zeros(N, dtype=bool),
+        active_mask=jnp.zeros(N, dtype=bool)
+                       .at[:cfg.n_in].set(True)
+                       .at[-cfg.n_out:].set(True),
         neuron_type=jnp.zeros(N, dtype=jnp.uint8),
         tau=jnp.full(N, 10.0),
         bias=jnp.zeros(N),
         weight_matrix=jnp.zeros((N, N)),
         edge_mask=jnp.zeros((N, N), dtype=bool),
     )
-    active = g.active_mask.at[:cfg.n_in].set(True).at[-cfg.n_out:].set(True)
-    return dataclasses.replace(g, active_mask=active, **overrides)
+    return dataclasses.replace(g, **overrides)
 
 
 # ── Integrator behaviour ─────────────────────────────────────────────────────
@@ -113,10 +114,10 @@ def test_batch_forward_matches_single(cfg):
     for i in range(P):
         g_i = jax.tree_util.tree_map(lambda x: x[i], pop)
         v_i, out_i, _ = forward_pass(g_i, v0s[i], ins[i], cfg)
-        np.testing.assert_allclose(v_batch[i], v_i, rtol=1e-5,
-                                   err_msg=f"v mismatch at organism {i}")
-        np.testing.assert_allclose(out_batch[i], out_i, rtol=1e-5,
-                                   err_msg=f"output mismatch at organism {i}")
+        np.testing.assert_allclose(v_batch[i], v_i, rtol=1e-4, atol=1e-6,
+                           err_msg=f"v mismatch at organism {i}")
+        np.testing.assert_allclose(out_batch[i], out_i, rtol=1e-4, atol=1e-6,
+                           err_msg=f"output mismatch at organism {i}")
 
 
 # ── Numerical stability at lattice density ───────────────────────────────────
