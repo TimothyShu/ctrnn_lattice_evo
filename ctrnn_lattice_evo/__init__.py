@@ -59,8 +59,6 @@ from .world import (
 
 from .controllers import random_walk, nearest_hotspot
 
-# ── Not yet implemented — uncomment as each stage lands ──────────────────────
-
 from .forward import forward_pass, batch_forward
 
 # Stage 5:
