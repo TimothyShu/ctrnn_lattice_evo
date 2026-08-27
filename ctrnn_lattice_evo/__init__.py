@@ -74,12 +74,11 @@ from .brain import (
     run_brain_episode, run_brain_episode_full, batch_run_brain_episode,
 )
 
-# Stage 9:
-# from .analysis import (
-#     modularity_q, local_fraction, network_stats,
-#     analyse_genome, analyse_population, summarise_run,
-# )
-#
+from .analysis import (
+    modularity_q, local_fraction, network_stats,
+    analyse_genome, analyse_population, summarise_run,
+)
+
 # Stage 10:
 # from .logger import (
 #     make_run_dir, save_config, load_config,

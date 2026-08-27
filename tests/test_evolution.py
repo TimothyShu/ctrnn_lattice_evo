@@ -212,7 +212,7 @@ def test_selection_prefers_better_network_under_extreme_penalty(cfg, wcfg):
     adjusted fitness and loses every tournament — evolution runs backwards
     while every unit test still passes.
     """
-    cfg_pen = dataclasses.replace(cfg, edge_frac=5.0, population_size=2)
+    cfg_pen = dataclasses.replace(cfg, edge_frac=5.0, population_size=2, tournament_size=2)
     two = jax.tree_util.tree_map(
         lambda x: jnp.stack([x, x]), grid_genome(jax.random.PRNGKey(0), cfg))
 
@@ -237,7 +237,7 @@ def test_selection_monotonic_across_frac_sweep(cfg, wcfg):
     raw_food = jnp.array([0.0, 0.0])
 
     for frac in [0.0, 0.05, 0.1, 0.2, 0.4, 0.6, 1.0, 2.0, 5.0]:
-        c = dataclasses.replace(cfg, edge_frac=frac, population_size=2)
+        c = dataclasses.replace(cfg, edge_frac=frac, population_size=2, tournament_size=2)
         f = compute_fitness(steps, c_acts, raw_food, two, c, wcfg)
         assert float(f[0]) >= float(f[1]), f"ordering inverted at edge_frac={frac}"
 
@@ -250,7 +250,7 @@ def test_sparser_network_wins_at_equal_performance(cfg, wcfg):
     pair = jax.tree_util.tree_map(lambda a, b: jnp.stack([a, b]), g,
                                   dataclasses.replace(g, edge_mask=half))
 
-    c = dataclasses.replace(cfg, edge_frac=0.3, population_size=2)
+    c = dataclasses.replace(cfg, edge_frac=0.3, population_size=2, tournament_size=2)
     f = compute_fitness(jnp.array([50.0, 50.0]), jnp.array([0.5, 0.5]),
                         jnp.array([0.0, 0.0]), pair, c, wcfg)
     assert float(f[1]) > float(f[0]), "pruning did not pay under a live penalty"
@@ -541,21 +541,21 @@ class TestCycleRamp:
         return Config(N_max=16, grid_W=4, grid_H=4, penalty_warmup_gens=200,
                       penalty_cycle_gens=300, penalty_cycle_free_gens=100)
 
-    @pytest.mark.parametrize("gen", [200, 300, 499, 600, 750, 899])
+    @pytest.mark.parametrize("gen", [200, 300, 399, 500, 650, 699])
     def test_penalty_on_during_locked_window(self, cfg, gen):
         assert _cycle_ramp(gen, cfg) == pytest.approx(1.0)
 
-    @pytest.mark.parametrize("gen", [500, 550, 599, 900, 999])
+    @pytest.mark.parametrize("gen", [400, 450, 499, 700, 799])
     def test_penalty_off_during_free_window(self, cfg, gen):
         assert _cycle_ramp(gen, cfg) == pytest.approx(0.0)
 
     def test_boundaries_are_exact(self, cfg):
         """The off-by-one: 499 is the last penalised gen, 500 the first free,
         599 the last free, 600 penalised again."""
-        assert _cycle_ramp(499, cfg) == pytest.approx(1.0)
-        assert _cycle_ramp(500, cfg) == pytest.approx(0.0)
-        assert _cycle_ramp(599, cfg) == pytest.approx(0.0)
-        assert _cycle_ramp(600, cfg) == pytest.approx(1.0)
+        assert _cycle_ramp(399, cfg) == pytest.approx(1.0)
+        assert _cycle_ramp(400, cfg) == pytest.approx(0.0)
+        assert _cycle_ramp(499, cfg) == pytest.approx(0.0)
+        assert _cycle_ramp(500, cfg) == pytest.approx(1.0)
 
     def test_disabled_is_always_on(self):
         cfg = Config(N_max=16, grid_W=4, grid_H=4,
@@ -566,5 +566,6 @@ class TestCycleRamp:
     def test_free_windows_are_a_minority(self, cfg):
         """free/cycle = 1/3 here; if most generations were free the run would
         silently be an unpenalised baseline."""
-        free = sum(1 for g in range(200, 1000) if _cycle_ramp(g, cfg) == 0.0)
-        assert free / 800 == pytest.approx(1 / 3, abs=0.05)
+        span = 3 * cfg.penalty_cycle_gens          # whole cycles only
+        free = sum(1 for g in range(200, 200 + span) if _cycle_ramp(g, cfg) == 0.0)
+        assert free / span == pytest.approx(1 / 3, abs=0.01)

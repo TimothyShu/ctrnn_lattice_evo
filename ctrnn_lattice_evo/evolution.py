@@ -1,54 +1,42 @@
 """
-evolution.py — Evolutionary loop for CTRNN neuroevolution.
+evolution.py — Evolutionary loop for CTRNN neuroevolution on a lattice.
 
 Public API
 ----------
 init_population(key, cfg)
-    Initialise a random population of genomes.
+    Population of cfg.population_size genomes, built by the constructor for
+    cfg.init_mode ("grid" / "uniform" / "sparse").
 
-eval_population(key, pop_genomes, cfg, wcfg, n_evals=5)
-    Evaluate each genome over n_evals independent episodes.
-    Returns (mean_steps[pop], mean_c_act[pop], mean_raw_food[pop]).
+eval_population(key, pop, cfg, wcfg, n_evals=5)
+    -> (mean_steps[P], mean_c_act[P], mean_raw_food[P])
 
-compute_fitness(steps, c_acts, raw_food, pop_genomes, cfg, wcfg)
-    Normalise performance metric to f_raw and apply cost penalties.
-    fitness_mode="survival": f_raw = steps / episode_steps  → [0, 1]
-    fitness_mode="food":     f_raw = raw_food / (episode_steps * n_food_types)  → [0, ∞)
-    Returns fitness[pop].
+compute_fitness(steps, c_acts, raw_food, pop, cfg, wcfg, generation=0)
+    Normalise to f_raw, apply the ramped proportional penalties.
 
-tournament_select_idx(key, fitness, tournament_size)
-    Sample tournament_size candidates, return index of the best.
+tournament_select_idx / select_parents / reproduce / evolve_step
+    One generation: select -> mutate -> elitism.
 
-select_parents(key, fitness, pop_size, tournament_size)
-    Run tournament selection pop_size times.
-    Returns parent_idxs[pop].
+collect_stats(generation, fitness, steps, pop, cfg, ...)
+    Per-generation statistics, including the edge count and local fraction
+    traces the pruning and locality claims are read from.
 
-reproduce(key, pop_genomes, parent_idxs, rates, cfg)
-    Gather parents by index, mutate each, return offspring population.
-
-evolve_step(key, pop_genomes, fitness, rates, cfg)
-    One full generation: select → reproduce → elitism.
-    Returns new (unevaluated) population.
-
-collect_stats(generation, fitness, steps, pop_genomes, cfg)
-    Compute per-generation statistics dict (Python floats, no JAX arrays).
-
-run_evolution(key, n_generations, cfg, wcfg, rates, n_evals, callback)
-    Drive the full evolutionary loop; return (best_genome, final_fitness, history).
+run_evolution(...)
+    -> (best_genome, final_fitness, history)
 """
 
 from __future__ import annotations
 
 import dataclasses
+from pathlib import Path
+
 import jax
 import jax.numpy as jnp
 
-from pathlib import Path
-
 from .config import Config
-from .genome import Genome, random_genome
+from .genome import Genome, constructor_for
 from .mutation import MutationRates, mutate
 from .cost import edge_count_cost, dist_cost, adjusted_fitness
+from .topology import dist_matrix, local_mask
 from .world import WorldConfig
 from .brain import run_brain_episode_full
 from .logger import save_training_state, load_training_state
@@ -57,28 +45,28 @@ from .logger import save_training_state, load_training_state
 # ── Population initialisation ─────────────────────────────────────────────────
 
 def init_population(key: jax.Array, cfg: Config) -> Genome:
-    """
-    Initialise a population of cfg.population_size random genomes.
+    """Initialise cfg.population_size genomes for this run's arm.
 
-    Returns a batched Genome with a leading [population_size] dimension
-    on every field.
+    The arm is chosen by looking up the constructor in Python, BEFORE the
+    vmap: cfg.init_mode is a string and a string cannot be a traced argument.
+
+    Note that in the "grid" arm every individual gets the SAME edge_mask, so
+    generation-0 diversity is parametric only (weights, tau, bias, type).
+    That is a deliberate departure from ctrnn_evo, where each individual
+    carried its own random topology, and it makes structural mutation the sole
+    source of topological diversity thereafter.
     """
+    ctor = constructor_for(cfg)
     keys = jax.random.split(key, cfg.population_size)
-    return jax.vmap(random_genome, in_axes=(0, None))(keys, cfg)
+    return jax.vmap(ctor, in_axes=(0, None))(keys, cfg)
 
 
 # ── Fitness evaluation ────────────────────────────────────────────────────────
 
-def _eval_genome(
-    keys: jax.Array,       # [n_evals, 2]
-    genome: Genome,
-    cfg: Config,
-    wcfg: WorldConfig,
-) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """
-    Evaluate a single genome over n_evals independent episodes.
+def _eval_genome(keys: jax.Array, genome: Genome, cfg: Config, wcfg: WorldConfig):
+    """Evaluate one genome over n_evals independent episodes.
 
-    Returns (mean_steps, mean_c_act, mean_raw_food) averaged across episodes.
+    Returns (mean_steps, mean_c_act, mean_raw_food) across episodes.
     """
     _, steps_all, c_acts_all, raw_food_all = jax.vmap(
         run_brain_episode_full, in_axes=(0, None, None, None)
@@ -96,22 +84,20 @@ def eval_population(
     cfg: Config,
     wcfg: WorldConfig,
     n_evals: int = 5,
-) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """
-    Evaluate the full population.
+):
+    """Evaluate the whole population, n_evals episodes each.
 
-    Each genome is assessed across n_evals episodes with independent seeds.
-    All evaluations are parallelised via nested vmap (population x episodes).
+    Nested vmap over (population x episodes).  Every genome-episode pair gets
+    an independent key, so the fitness estimate averages out world randomness
+    rather than sharing it across the population.
 
     Returns
     -------
-    mean_steps     : float32 [pop_size] — average steps survived
-    mean_c_acts    : float32 [pop_size] — average activation cost
-    mean_raw_food  : float32 [pop_size] — average cumulative raw food score
-                     (sum of uncapped food_at over alive steps, averaged across evals)
+    mean_steps    : float32 [P] — steps survived
+    mean_c_acts   : float32 [P] — activation cost, in [0, 1]
+    mean_raw_food : float32 [P] — cumulative uncapped food score, >= 0
     """
-    # Split into [pop_size, n_evals, 2] keys
-    flat_keys  = jax.random.split(key, cfg.population_size * n_evals)
+    flat_keys = jax.random.split(key, cfg.population_size * n_evals)
     epoch_keys = flat_keys.reshape(cfg.population_size, n_evals, -1)
 
     return jax.vmap(_eval_genome, in_axes=(0, 0, None, None))(
@@ -119,12 +105,14 @@ def eval_population(
     )
 
 
-def _mutation_scale(generation: int, cfg: Config) -> float:
-    """Scale factor for continuous mutation sigmas during warmup.
+# ── Penalty schedule ──────────────────────────────────────────────────────────
 
-    Mirrors the penalty ramp in reverse: starts at mutation_warmup_scale at
-    gen 0, decays linearly to 1.0 at penalty_warmup_gens, stays 1.0 after.
-    Returns 1.0 when mutation_warmup_scale==1.0 or penalty_warmup_gens==0.
+def _mutation_scale(generation: int, cfg: Config) -> float:
+    """Scale for continuous mutation sigmas during warm-up.
+
+    Mirrors the penalty ramp in reverse: mutation_warmup_scale at gen 0,
+    decaying linearly to 1.0 at penalty_warmup_gens, 1.0 thereafter.  Wide
+    exploration while the penalty is still near zero.
     """
     if cfg.mutation_warmup_scale > 1.0 and cfg.penalty_warmup_gens > 0:
         ramp = min(generation / cfg.penalty_warmup_gens, 1.0)
@@ -133,18 +121,25 @@ def _mutation_scale(generation: int, cfg: Config) -> float:
 
 
 def _warmup_ramp(generation: int, cfg: Config) -> float:
-    """Linear ramp from 0 to 1 over penalty_warmup_gens; 1.0 thereafter."""
+    """Linear 0 -> 1 over penalty_warmup_gens; 1.0 thereafter.
+
+    This is half of the over-pruning fix: networks are not pruned before any
+    foraging strategy has had a chance to evolve.
+    """
     if cfg.penalty_warmup_gens > 0:
         return min(generation / cfg.penalty_warmup_gens, 1.0)
     return 1.0
 
 
 def _cycle_ramp(generation: int, cfg: Config) -> float:
-    """1.0 during penalty phases; 0.0 during the free window at end of each cycle.
-    Always returns 1.0 during the warmup period so the two functions compose cleanly."""
+    """1.0 during penalty phases, 0.0 during the free window of each cycle.
+
+    Returns 1.0 throughout the warm-up range so the two ramps compose by
+    multiplication: warm-up controls early, cycling controls later.
+    """
     if cfg.penalty_cycle_gens > 0 and cfg.penalty_cycle_free_gens > 0:
         if generation < cfg.penalty_warmup_gens:
-            return 1.0  # warmup handles this range; don't interfere
+            return 1.0
         pos = (generation - cfg.penalty_warmup_gens) % cfg.penalty_cycle_gens
         if pos >= cfg.penalty_cycle_gens - cfg.penalty_cycle_free_gens:
             return 0.0
@@ -152,57 +147,47 @@ def _cycle_ramp(generation: int, cfg: Config) -> float:
 
 
 def compute_fitness(
-    steps: jnp.ndarray,        # [pop_size] float32 mean steps survived
-    c_acts: jnp.ndarray,       # [pop_size] float32 mean activation cost
-    raw_food: jnp.ndarray,     # [pop_size] float32 mean cumulative raw food score
+    steps: jnp.ndarray,      # [P] mean steps survived
+    c_acts: jnp.ndarray,     # [P] mean activation cost
+    raw_food: jnp.ndarray,   # [P] mean cumulative raw food
     pop_genomes: Genome,
     cfg: Config,
     wcfg: WorldConfig,
     generation: int = 0,
 ) -> jnp.ndarray:
-    """
-    Convert raw evaluation metrics to adjusted fitness scores.
+    """Convert raw evaluation metrics to adjusted fitness.
 
-    fitness_mode="survival" (default):
-        f_raw = mean_steps / episode_steps  → [0, 1]
+    fitness_mode="survival": f_raw = mean_steps / episode_steps, in [0, 1]
+    fitness_mode="food":     f_raw = mean_raw_food / (episode_steps * n_food_types)
+                             which may exceed 1.0 but is never negative.
 
-    fitness_mode="food":
-        f_raw = mean_raw_food / (episode_steps * n_food_types)
-        Can exceed 1.0 for agents that actively forage near hotspot centres.
+    Both are non-negative, which the multiplicative penalty depends on: with
+    f_raw < 0 a penalty multiplier below 1 would IMPROVE the score.
 
-    Penalty schedule:
-        ramp = _warmup_ramp(gen, cfg) × _cycle_ramp(gen, cfg)
+    The penalty is scaled by _warmup_ramp * _cycle_ramp.  Only the three
+    proportional fracs are ramped — ctrnn_evo's absolute lambda_* mode is gone.
 
-        _warmup_ramp: linearly scales penalties from 0→1 over penalty_warmup_gens,
-            then stays at 1.0 — protects early exploration from over-pruning.
-
-        _cycle_ramp: drops to 0.0 during the free window at the end of every
-            penalty_cycle_gens block after warmup — periodic loosening that lets
-            cold reps escape local optima before pressure resumes.
-
-        The product composes cleanly: during warmup _cycle_ramp=1 so warmup
-        controls; after warmup _warmup_ramp=1 so cycling controls.
-
-    Returns fitness [pop_size].
+    Returns fitness [P], each >= 0 (adjusted_fitness clamps the multiplier).
     """
     ramp = _warmup_ramp(generation, cfg) * _cycle_ramp(generation, cfg)
     if ramp != 1.0:
         cfg = dataclasses.replace(
             cfg,
-            lambda_edge=cfg.lambda_edge * ramp,
-            lambda_dist=cfg.lambda_dist * ramp,
-            lambda_act=cfg.lambda_act  * ramp,
-            dist_frac=cfg.dist_frac * ramp,
-            act_frac=cfg.act_frac   * ramp,
             edge_frac=cfg.edge_frac * ramp,
+            dist_frac=cfg.dist_frac * ramp,
+            act_frac=cfg.act_frac * ramp,
         )
 
     if cfg.fitness_mode == "food":
         f_raw = raw_food / float(wcfg.episode_steps * wcfg.n_food_types)
-    else:  # "survival" (default)
+    else:
         f_raw = steps / float(wcfg.episode_steps)
-    return jax.vmap(adjusted_fitness, in_axes=(0, 0, 0, None))(
-        f_raw, pop_genomes, c_acts, cfg
+
+    # Built once per generation, not per genome — geometry is shared.
+    dist = dist_matrix(cfg.grid_W, cfg.grid_H)
+
+    return jax.vmap(adjusted_fitness, in_axes=(0, 0, 0, None, None))(
+        f_raw, pop_genomes, c_acts, cfg, dist
     )
 
 
@@ -213,15 +198,18 @@ def tournament_select_idx(
     fitness: jnp.ndarray,
     tournament_size: int,
 ) -> jnp.ndarray:
-    """
-    Sample tournament_size candidates (with replacement) and return the
-    index of the one with the highest fitness.
+    """Sample tournament_size candidates and return the index of the best.
+
+    Selection acts on adjusted fitness, which is clamped at 0.  Under a heavy
+    penalty many individuals tie at exactly 0 and argmax breaks ties by lowest
+    index — a real loss of gradient, but strictly better than the unclamped
+    alternative, where a negative multiplier would make the BEST network score
+    most negative and invert selection entirely.
     """
     candidate_idxs = jax.random.choice(
         key, fitness.shape[0], shape=(tournament_size,), replace=False
     )
-    best_in_tourney = jnp.argmax(fitness[candidate_idxs])
-    return candidate_idxs[best_in_tourney]
+    return candidate_idxs[jnp.argmax(fitness[candidate_idxs])]
 
 
 def select_parents(
@@ -230,9 +218,7 @@ def select_parents(
     pop_size: int,
     tournament_size: int,
 ) -> jnp.ndarray:
-    """
-    Run pop_size independent tournaments and return winner indices [pop_size].
-    """
+    """pop_size independent tournaments; returns winner indices [pop_size]."""
     keys = jax.random.split(key, pop_size)
     return jax.vmap(tournament_select_idx, in_axes=(0, None, None))(
         keys, fitness, tournament_size
@@ -244,19 +230,12 @@ def select_parents(
 def reproduce(
     key: jax.Array,
     pop_genomes: Genome,
-    parent_idxs: jnp.ndarray,   # [pop_size] int
+    parent_idxs: jnp.ndarray,
     rates: MutationRates,
     cfg: Config,
 ) -> Genome:
-    """
-    Build an offspring population by gathering selected parents and mutating each.
-
-    Returns a new batched Genome [pop_size].
-    """
-    # Gather parents (advanced indexing — safe inside jit/vmap)
+    """Gather the selected parents and mutate each into an offspring."""
     offspring = jax.tree_util.tree_map(lambda x: x[parent_idxs], pop_genomes)
-
-    # Mutate every offspring with an independent key
     mut_keys = jax.random.split(key, cfg.population_size)
     return jax.vmap(mutate, in_axes=(0, 0, None, None))(mut_keys, offspring, cfg, rates)
 
@@ -266,83 +245,94 @@ def reproduce(
 def evolve_step(
     key: jax.Array,
     pop_genomes: Genome,
-    fitness: jnp.ndarray,   # [pop_size] — fitness of current population
+    fitness: jnp.ndarray,
     rates: MutationRates,
     cfg: Config,
     generation: int = 0,
 ) -> Genome:
-    """
-    Produce the next generation via tournament selection + mutation + elitism.
+    """One generation: tournament selection, mutation, elitism.
 
-    The best genome from the current population is copied unchanged into
-    slot 0 of the offspring (elitism = 1), preventing fitness regression.
+    The best genome is copied unchanged into slot 0.  Because the copy is a
+    whole-pytree assignment it carries edge_mask and active_mask as well as
+    the weights — a well-pruned elite must not be silently rewired each
+    generation.
 
-    When cfg.mutation_warmup_scale > 1.0, continuous mutation sigmas are
-    scaled down from mutation_warmup_scale at gen 0 to 1.0 at
-    penalty_warmup_gens — mirroring the penalty ramp to encourage
-    exploration when penalty pressure is absent.
-
-    Returns the new (unevaluated) offspring population.
+    Returns the new, unevaluated offspring population.
     """
     k_sel, k_mut = jax.random.split(key)
 
-    # Scale continuous sigmas during warmup
     scale = _mutation_scale(generation, cfg)
     if scale != 1.0:
         rates = dataclasses.replace(
             rates,
-            weight_sigma=rates.weight_sigma   * scale,
-            tau_sigma=rates.tau_sigma         * scale,
-            bias_sigma=rates.bias_sigma       * scale,
-            position_sigma=rates.position_sigma * scale,
+            weight_sigma=rates.weight_sigma * scale,
+            tau_sigma=rates.tau_sigma * scale,
+            bias_sigma=rates.bias_sigma * scale,
         )
 
-    # Selection + mutation
     parent_idxs = select_parents(k_sel, fitness, cfg.population_size, cfg.tournament_size)
-    offspring   = reproduce(k_mut, pop_genomes, parent_idxs, rates, cfg)
+    offspring = reproduce(k_mut, pop_genomes, parent_idxs, rates, cfg)
 
-    # Elitism: force the current best into slot 0 unchanged
-    best_idx  = jnp.argmax(fitness)
-    elite     = jax.tree_util.tree_map(lambda x: x[best_idx], pop_genomes)
-    offspring = jax.tree_util.tree_map(
-        lambda e, o: o.at[0].set(e), elite, offspring
-    )
-
-    return offspring
+    best_idx = jnp.argmax(fitness)
+    elite = jax.tree_util.tree_map(lambda x: x[best_idx], pop_genomes)
+    return jax.tree_util.tree_map(lambda e, o: o.at[0].set(e), elite, offspring)
 
 
 # ── Per-generation statistics ─────────────────────────────────────────────────
 
 def collect_stats(
     generation: int,
-    fitness: jnp.ndarray,           # [pop_size]
-    steps: jnp.ndarray,             # [pop_size]
+    fitness: jnp.ndarray,
+    steps: jnp.ndarray,
     pop_genomes: Genome,
     cfg: Config,
-    raw_food: "jnp.ndarray | None" = None,   # [pop_size] — optional
-    wcfg: "WorldConfig | None"     = None,   # needed to normalise raw_food
+    raw_food: "jnp.ndarray | None" = None,
+    wcfg: "WorldConfig | None" = None,
 ) -> dict:
-    """
-    Compute summary statistics for the current generation.
+    """Summary statistics for the current generation, as plain Python scalars.
 
-    All values are plain Python floats/ints for easy serialisation.
-    If raw_food and wcfg are provided, mean_food_score is added to the dict
-    (normalised by episode_steps * n_food_types so it is comparable to f_raw
-    under fitness_mode="food").
+    Two of these are the experiment's primary traces:
+
+    mean_n_edges — "when do edges die" is the actual over-pruning measurement,
+        and it has to be a per-generation trace rather than an end-of-run
+        number.  If it flattens well above the target band, raise
+        remove_edge_p_per_edge rather than edge_frac: one sets how fast edges
+        CAN die, the other how much dying is worth.
+
+    mean_local_fraction — how much of the lattice prior survives.  The grid arm
+        starts at 1.0; a uniform random digraph at the same density sits near
+        n_edges/(N^2-N), about 0.27 at 8x8 r=2.  That is the floor to read
+        against, not zero.
+
+    Everything here is vectorised over the population; the expensive networkx
+    metrics live in analysis.py and run once at the end.
     """
-    edge_costs   = jax.vmap(edge_count_cost)(pop_genomes)          # [pop_size]
-    wiring_costs = jax.vmap(dist_cost)(pop_genomes)                # [pop_size]
-    n_active     = jnp.sum(pop_genomes.active_mask, axis=-1)       # [pop_size]
+    dist = dist_matrix(cfg.grid_W, cfg.grid_H)
+    m = local_mask(cfg.grid_W, cfg.grid_r, cfg.grid_H)
+
+    edge_costs = jax.vmap(edge_count_cost)(pop_genomes)                # [P]
+    wiring_costs = jax.vmap(dist_cost, in_axes=(0, None))(pop_genomes, dist)
+    n_active = jnp.sum(pop_genomes.active_mask, axis=-1)               # [P]
+
+    active_pairs = (
+        pop_genomes.active_mask[:, :, None] & pop_genomes.active_mask[:, None, :]
+    )
+    active_edges = pop_genomes.edge_mask & active_pairs                # [P, N, N]
+    n_edges = jnp.sum(active_edges, axis=(1, 2))                       # [P]
+    n_local = jnp.sum(active_edges & m[None, :, :], axis=(1, 2))       # [P]
+    local_frac = n_local / jnp.maximum(n_edges, 1)
 
     stats = {
-        "generation":       generation,
-        "max_fitness":      float(jnp.max(fitness)),
-        "mean_fitness":     float(jnp.mean(fitness)),
-        "max_steps":        int(jnp.max(steps)),
-        "mean_steps":       float(jnp.mean(steps)),
-        "mean_n_active":    float(jnp.mean(n_active.astype(jnp.float32))),
-        "mean_edge_cost":   float(jnp.mean(edge_costs)),
-        "mean_wiring_cost": float(jnp.mean(wiring_costs)),
+        "generation":          generation,
+        "max_fitness":         float(jnp.max(fitness)),
+        "mean_fitness":        float(jnp.mean(fitness)),
+        "max_steps":           int(jnp.max(steps)),
+        "mean_steps":          float(jnp.mean(steps)),
+        "mean_n_active":       float(jnp.mean(n_active.astype(jnp.float32))),
+        "mean_n_edges":        float(jnp.mean(n_edges.astype(jnp.float32))),
+        "mean_edge_cost":      float(jnp.mean(edge_costs)),
+        "mean_wiring_cost":    float(jnp.mean(wiring_costs)),
+        "mean_local_fraction": float(jnp.mean(local_frac)),
     }
 
     if raw_food is not None and wcfg is not None:
@@ -367,60 +357,28 @@ def run_evolution(
     state_checkpoint_dir: "str | Path | None" = None,
     state_checkpoint_every: int = 100,
 ) -> tuple[Genome, jnp.ndarray, list[dict]]:
-    """
-    Drive the full evolutionary loop.
+    """Drive the full evolutionary loop.
 
-    Each generation:
-      1. Collect stats on the current evaluated population.
-      2. (Optional) call callback(stats, best_genome).
-      3. (Optional) call early_stop_fn(stats) — halt if it returns True.
-      4. evolve_step  -> new unevaluated offspring.
-      5. eval_population + compute_fitness on offspring.
-      6. (Optional) save full training state for resume capability.
+    Each generation: collect stats on the evaluated population, fire the
+    callback, check early stop, evolve, evaluate, optionally snapshot.
 
     Parameters
     ----------
-    key            : JAX PRNGKey
-    n_generations  : maximum number of generations to run
-    cfg            : network / evolution hyperparameters
-    wcfg           : world parameters
-    rates          : mutation operator intensities
-    n_evals        : episodes per fitness estimate (averaged for stability)
-    callback       : optional callable(stats, best_genome) fired each generation
-    early_stop_fn  : optional callable(stats) -> bool; return True to stop early.
-                     The run exits cleanly after the current generation's stats
-                     and callback have fired — best_genome and history up to that
-                     point are returned as normal.
+    n_evals       : episodes per fitness estimate, averaged for stability
+    callback      : callable(stats, best_genome), fired once per generation
+    early_stop_fn : callable(stats) -> bool.  Checked AFTER the callback so the
+                    final generation is fully logged before exiting.  See
+                    fitness_threshold and convergence_stop below.
+    resume_from   : a state_gen_*.npz from a previous run.  `key` is IGNORED
+                    when set — the saved RNG state is restored instead, which
+                    is what makes a resumed run reproduce the sequence an
+                    uninterrupted one would have followed.  The returned
+                    history covers only the newly completed generations; use
+                    load_history(run_dir) for the full record.
+    state_checkpoint_dir / _every : where and how often to snapshot.
 
-                     Built-in helpers (importable from ctrnn_lattice_evo.evolution):
-                       fitness_threshold(min_fitness)   — stop when max_fitness >= value
-                       convergence_stop(window, tol)    — stop when max_fitness hasn't
-                                                          improved by tol in last window gens
-
-    resume_from    : path to a state_gen_*.npz written by a previous run.
-                     When provided the ``key`` argument is ignored — the saved
-                     RNG state is used instead.  The loop resumes from the
-                     saved generation number; history returned covers only the
-                     newly-completed generations.  Use load_history(run_dir) to
-                     read the full history including pre-resume generations.
-                     Shortcut: pass latest_state_checkpoint(run_dir) directly.
-
-    state_checkpoint_dir  : directory to write state_gen_*.npz snapshots into
-                            (typically run_dir / "checkpoints").  If None,
-                            state snapshots are not saved.
-
-    state_checkpoint_every : save a state snapshot every this many generations
-                             (default 100).  Only used when state_checkpoint_dir
-                             is set.
-
-    Returns
-    -------
-    best_genome    : single Genome (unbatched) with highest final fitness
-    final_fitness  : float32 [pop_size] fitness of the last completed generation
-    history        : list of stats dicts, one per completed generation
-                     (from start_gen to the last completed generation)
+    Returns (best_genome unbatched, final_fitness [P], history).
     """
-    # ── Initialise or resume ─────────────────────────────────────────────────
     if resume_from is not None:
         pop, fitness, steps, key, start_gen, raw_food = load_training_state(resume_from)
         print(f"  Resuming from generation {start_gen} "
@@ -428,10 +386,9 @@ def run_evolution(
     else:
         start_gen = 0
         key, k_init, k_eval = jax.random.split(key, 3)
-        pop                   = init_population(k_init, cfg)
+        pop = init_population(k_init, cfg)
         steps, c_acts, raw_food = eval_population(k_eval, pop, cfg, wcfg, n_evals)
-        fitness               = compute_fitness(steps, c_acts, raw_food, pop, cfg, wcfg,
-                                                generation=0)
+        fitness = compute_fitness(steps, c_acts, raw_food, pop, cfg, wcfg, generation=0)
 
     history: list[dict] = []
 
@@ -439,39 +396,31 @@ def run_evolution(
         state_checkpoint_dir = Path(state_checkpoint_dir)
         state_checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── Generation loop ───────────────────────────────────────────────────────
     for gen in range(start_gen, n_generations):
-        # Stats on current (already-evaluated) population
         stats = collect_stats(gen, fitness, steps, pop, cfg, raw_food=raw_food, wcfg=wcfg)
         history.append(stats)
 
         if callback is not None:
             best_idx_cb = int(jnp.argmax(fitness))
-            best_cb     = jax.tree_util.tree_map(lambda x: x[best_idx_cb], pop)
+            best_cb = jax.tree_util.tree_map(lambda x: x[best_idx_cb], pop)
             callback(stats, best_cb)
 
-        # Early exit — check after callback so the final state is fully logged
         if early_stop_fn is not None and early_stop_fn(stats):
             break
 
-        # Evolve → evaluate
         key, k_step, k_eval = jax.random.split(key, 3)
-        pop                     = evolve_step(k_step, pop, fitness, rates, cfg, generation=gen)
+        pop = evolve_step(k_step, pop, fitness, rates, cfg, generation=gen)
         steps, c_acts, raw_food = eval_population(k_eval, pop, cfg, wcfg, n_evals)
-        fitness                 = compute_fitness(steps, c_acts, raw_food, pop, cfg, wcfg,
-                                                  generation=gen + 1)
+        fitness = compute_fitness(steps, c_acts, raw_food, pop, cfg, wcfg,
+                                  generation=gen + 1)
 
-        # State snapshot — labelled with the generation about to be collected
         next_gen = gen + 1
-        if (
-            state_checkpoint_dir is not None
-            and next_gen % state_checkpoint_every == 0
-        ):
+        if state_checkpoint_dir is not None and next_gen % state_checkpoint_every == 0:
             snap_path = state_checkpoint_dir / f"state_gen_{next_gen:06d}.npz"
-            save_training_state(snap_path, pop, fitness, steps, key, next_gen, raw_food=raw_food)
+            save_training_state(snap_path, pop, fitness, steps, key, next_gen,
+                                raw_food=raw_food)
 
-    # ── Extract best genome (unbatched) ──────────────────────────────────────
-    best_idx    = int(jnp.argmax(fitness))
+    best_idx = int(jnp.argmax(fitness))
     best_genome = jax.tree_util.tree_map(lambda x: x[best_idx], pop)
 
     return best_genome, fitness, history
@@ -480,11 +429,11 @@ def run_evolution(
 # ── Built-in early-stop helpers ───────────────────────────────────────────────
 
 def fitness_threshold(min_fitness: float):
-    """
-    Stop when max_fitness reaches or exceeds min_fitness.
+    """Stop when max_fitness reaches min_fitness.
 
-    Example — stop once the best genome survives 95% of the episode:
-        early_stop_fn=fitness_threshold(0.95)
+    Note this tests ADJUSTED fitness, which under a live penalty is strictly
+    below the raw survival fraction — a threshold of 0.95 may be unreachable
+    at edge_frac=0.2 even for a perfect forager.
     """
     def _check(stats: dict) -> bool:
         return stats["max_fitness"] >= min_fitness
@@ -492,12 +441,14 @@ def fitness_threshold(min_fitness: float):
 
 
 def convergence_stop(window: int = 50, tol: float = 1e-3):
-    """
-    Stop when max_fitness has not improved by more than tol over the last
-    window generations.  Requires at least window generations to have run.
+    """Stop when max_fitness has not improved by more than tol over `window`
+    generations.  Requires at least `window` generations to have run.
 
-    Example — stop if fitness plateaus for 100 generations:
-        early_stop_fn=convergence_stop(window=100, tol=1e-3)
+    Careful with the cyclic penalty schedule: a free window drops the penalty
+    to zero and lifts adjusted fitness for reasons unrelated to progress, so a
+    convergence check spanning a cycle boundary can read as improvement.  Set
+    window shorter than penalty_cycle_free_gens, or leave cycling off when
+    using this.
     """
     recent: list[float] = []
 
@@ -505,7 +456,6 @@ def convergence_stop(window: int = 50, tol: float = 1e-3):
         recent.append(stats["max_fitness"])
         if len(recent) < window:
             return False
-        improvement = recent[-1] - recent[-window]
-        return improvement < tol
+        return recent[-1] - recent[-window] < tol
 
     return _check
