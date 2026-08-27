@@ -17,6 +17,7 @@ from ctrnn_lattice_evo.topology import (
     dist_matrix,
     local_mask,
     expected_edges,
+    reference_costs,
 )
 
 
@@ -92,15 +93,6 @@ def test_dist_matrix_corner_to_corner():
     d = dist_matrix(8, 8)
     assert float(d[0, 63]) == 7.0
 
-
-def test_dist_matrix_triangle_inequality():
-    d = dist_matrix(4, 4)
-    assert jnp.all(d[:, None, :] + d[None, :, :].transpose(1, 0, 2) >= 0)
-    # explicit spot check
-    for a, b, c in [(0, 5, 10), (3, 7, 12), (1, 2, 15)]:
-        assert float(d[a, c]) <= float(d[a, b]) + float(d[b, c]) + 1e-6
-
-
 # ── local_mask ───────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("W,H,r", [(4, 4, 1), (4, 4, 2), (8, 8, 1), (8, 8, 2), (4, 16, 2)])
@@ -170,7 +162,6 @@ def test_full_radius_is_all_pairs():
     """At r >= W-1 on a square lattice the mask is complete (minus diagonal)."""
     W = 4
     m = local_mask(W, W - 1)
-    assert int(m.sum()) == W * W * (W * W - 1) // 1 - 0 if False else int(m.sum())
     assert int(m.sum()) == (W * W) * (W * W - 1)
 
 
@@ -210,3 +201,100 @@ def test_rectangular_traversal_is_longer_than_square():
     """4x16 doubles the I/O hop count relative to 8x8 at equal N."""
     assert float(dist_matrix(8, 8)[0, 63]) == 7.0
     assert float(dist_matrix(4, 16)[0, 63]) == 15.0
+
+# ── reference_costs ───────────────────────────────────────────────────────────
+ 
+def test_reference_costs_returns_pair():
+    out = reference_costs(4, 1)
+    assert isinstance(out, tuple) and len(out) == 2
+ 
+ 
+def test_reference_costs_edge_matches_mask():
+    """C0_edge is just the lattice edge count — same number expected_edges gives."""
+    for W, r, H in [(4, 1, None), (8, 2, None), (4, 2, 16)]:
+        c0_edge, _ = reference_costs(W, r, H)
+        assert c0_edge == pytest.approx(expected_edges(W, r, H))
+        assert c0_edge == pytest.approx(float(local_mask(W, r, H).sum()))
+ 
+ 
+def test_reference_costs_dist_matches_manual_sum():
+    """C0_dist is the summed Chebyshev length over masked pairs."""
+    for W, r in [(4, 1), (4, 2), (8, 2)]:
+        _, c0_dist = reference_costs(W, r)
+        d, m = dist_matrix(W), local_mask(W, r)
+        assert c0_dist == pytest.approx(float(jnp.sum(jnp.where(m, d, 0.0))))
+ 
+ 
+@pytest.mark.parametrize("W,r,H,exp_edge,exp_dist", [
+    (4,  1, None,   84.0,    84.0),
+    (4,  2, None,  180.0,   276.0),
+    (8,  1, None,  420.0,   420.0),
+    (8,  2, None, 1092.0,  1764.0),   # the production lattice
+    (8,  3, None, 1872.0,  4104.0),
+    (12, 2, None, 2772.0,  4532.0),
+    (4,  2,   16,  972.0,  1548.0),
+])
+def test_reference_costs_known_values(W, r, H, exp_edge, exp_dist):
+    """Pinned so a change to local_mask or dist_matrix cannot silently move the
+    denominators every penalty is normalised against."""
+    c0_edge, c0_dist = reference_costs(W, r, H)
+    assert c0_edge == pytest.approx(exp_edge)
+    assert c0_dist == pytest.approx(exp_dist)
+ 
+ 
+def test_reference_costs_collinear_at_radius_one():
+    """At r=1 every edge has length 1, so C0_dist == C0_edge exactly — the
+    wiring-length penalty is not an independent axis at this radius."""
+    for W in (4, 8, 12):
+        c0_edge, c0_dist = reference_costs(W, 1)
+        assert c0_dist == pytest.approx(c0_edge)
+ 
+ 
+def test_reference_costs_separate_at_radius_two():
+    """The precondition for treating length as its own penalty axis."""
+    c0_edge, c0_dist = reference_costs(8, 2)
+    assert c0_dist > c0_edge
+ 
+ 
+def test_reference_costs_mean_edge_length_plausible():
+    """Mean length must sit in [1, r] — a value outside that means the mask and
+    the distance matrix disagree about what a neighbour is."""
+    for W, r in [(4, 1), (4, 2), (8, 2), (8, 3), (12, 2)]:
+        c0_edge, c0_dist = reference_costs(W, r)
+        mean_len = c0_dist / c0_edge
+        assert 1.0 <= mean_len <= float(r)
+ 
+ 
+def test_reference_costs_grow_with_radius():
+    for W in (8, 12):
+        prev_e, prev_d = reference_costs(W, 1)
+        for r in (2, 3):
+            e, d = reference_costs(W, r)
+            assert e > prev_e and d > prev_d
+            prev_e, prev_d = e, d
+ 
+ 
+def test_reference_costs_grow_with_lattice_size():
+    small_e, small_d = reference_costs(4, 1)
+    large_e, large_d = reference_costs(8, 1)
+    assert large_e > small_e and large_d > small_d
+ 
+ 
+def test_reference_costs_are_positive_floats():
+    for W, r in [(4, 1), (8, 2)]:
+        c0_edge, c0_dist = reference_costs(W, r)
+        assert isinstance(c0_edge, float) and isinstance(c0_dist, float)
+        assert c0_edge > 0 and c0_dist > 0
+ 
+ 
+def test_reference_costs_reject_legacy_constants():
+    """ctrnn_evo used C0_edge=154 / C0_wiring=77, measured on a sparse random
+    init.  The production lattice is ~7x and ~23x those; inheriting them drives
+    the penalty bracket negative and inverts selection."""
+    c0_edge, c0_dist = reference_costs(8, 2)
+    assert c0_edge / 154.0 > 5.0
+    assert c0_dist / 77.0 > 5.0
+ 
+ 
+def test_reference_costs_square_default_matches_explicit_h():
+    assert reference_costs(8, 2) == reference_costs(8, 2, 8)

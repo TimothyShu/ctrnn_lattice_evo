@@ -21,3 +21,23 @@ def local_mask(W: int, r: int, H: int | None = None) -> jnp.ndarray:
     """Directed adjacency for a Chebyshev ball of radius r. No self-edges."""
     d = dist_matrix(W, H)
     return (d <= r) & (d > 0)
+
+def expected_edges(W: int, r: int, H: int | None = None) -> int:
+    """Closed-form directed edge count for local_mask(W, r, H).
+
+    Chebyshev distance is the max over axes, so a pair is within radius r
+    exactly when it is within r on both axes independently — the count
+    factorises. (This is why the same form does NOT hold for Manhattan.)
+    """
+    H = W if H is None else H
+
+    def _A(L: int) -> int:
+        """Ordered 1-D pairs (i, j) with |i - j| <= r on a line of length L."""
+        return L + 2 * sum(L - d for d in range(1, min(r, L - 1) + 1))
+
+    return _A(W) * _A(H) - W * H
+
+def reference_costs(W: int, r: int, H: int | None = None) -> tuple[float, float]:
+    m = local_mask(W, r, H)
+    d = dist_matrix(W, H)
+    return float(m.sum()), float(jnp.sum(jnp.where(m, d, 0.0)))
