@@ -61,22 +61,19 @@ from .controllers import random_walk, nearest_hotspot
 
 from .forward import forward_pass, batch_forward
 
-# Stage 5:
-# from .cost import edge_count_cost, dist_cost, adjusted_fitness
-#
-# Stage 6:
-# from .mutation import (
-#     MutationRates,
-#     perturb_weights, perturb_tau, perturb_bias,
-#     type_flip, add_edge, remove_edges,
-#     mutate,
-# )
-#
-# Stage 8:
-# from .brain import (
-#     run_brain_episode, run_brain_episode_full, batch_run_brain_episode,
-# )
-#
+from .cost import edge_count_cost, dist_cost, adjusted_fitness
+
+from .mutation import (
+    MutationRates,
+    perturb_weights, perturb_tau, perturb_bias,
+    type_flip, add_edge, remove_edges,
+    mutate,
+)
+
+from .brain import (
+    run_brain_episode, run_brain_episode_full, batch_run_brain_episode,
+)
+
 # Stage 9:
 # from .analysis import (
 #     modularity_q, local_fraction, network_stats,
