@@ -64,7 +64,6 @@ _GENOME_FIELDS = [
     "neuron_type",
     "tau",
     "bias",
-    "position",
     "weight_matrix",
     "edge_mask",
 ]
@@ -125,30 +124,32 @@ def load_config(run_dir: Path) -> tuple[Config, WorldConfig, MutationRates]:
         return {k: tuple(v) if isinstance(v, list) else v for k, v in d.items()}
 
     def _migrate(d: dict) -> dict:
+        """Fill in fields added after a config was written.
+
+        Note this cannot load a ctrnn_evo config: lambda_edge/lambda_dist/
+        lambda_act and C0_wiring no longer exist, and the lattice fields
+        (grid_W/H/r, init_mode) have no sensible default for an arbitrary
+        N_max.  Those runs are not reproducible here by design.
+
+        C0_edge and C0_dist are deliberately NOT defaulted — absent means None,
+        which makes __post_init__ derive them from the lattice.  Defaulting
+        C0_edge to ctrnn_evo's 154 would apply a ~7x over-penalty at generation
+        zero and read as "locality fails".
+        """
         d = dict(d)
-        # lambda_conn was split into lambda_edge + lambda_dist; treat old value as lambda_dist
-        if "lambda_conn" in d and "lambda_dist" not in d:
-            d["lambda_dist"] = d.pop("lambda_conn")
-        # n_in is now derived from n_food_types via __post_init__; remove to avoid conflict
-        d.pop("n_in", None)
-        # default n_food_types for runs predating multi-food-type support
+        d.pop("n_in", None)   # derived by __post_init__; passing it collides
         d.setdefault("n_food_types", 1)
-        # default fitness_mode for runs predating food-score fitness support
         d.setdefault("fitness_mode", "survival")
-        # default position_sensors for runs predating proprioceptive sensor support
         d.setdefault("position_sensors", False)
-        # default penalty_warmup_gens for runs predating warm-up support
         d.setdefault("penalty_warmup_gens", 0)
         d.setdefault("penalty_cycle_gens", 0)
         d.setdefault("penalty_cycle_free_gens", 0)
         d.setdefault("mutation_warmup_scale", 1.0)
-        # defaults for proportional penalty fracs (runs predating this feature)
-        d.setdefault("dist_frac",  0.0)
-        d.setdefault("act_frac",   0.0)
-        d.setdefault("edge_frac",  0.0)
-        d.setdefault("C0_wiring",  77.0)
-        d.setdefault("C0_act",     1.0)
-        d.setdefault("C0_edge",    154.0)
+        d.setdefault("dist_frac", 0.0)
+        d.setdefault("act_frac", 0.0)
+        d.setdefault("edge_frac", 0.0)
+        d.setdefault("node_ops_enabled", False)
+        d.setdefault("sparse_n_active", None)
         return d
 
     def _migrate_wcfg(d: dict) -> dict:
@@ -180,9 +181,19 @@ def save_genome(path: str | Path, genome: Genome) -> None:
 
 
 def load_genome(path: str | Path) -> Genome:
-    """Reconstruct a Genome from a .npz archive saved by save_genome."""
-    archive  = np.load(str(path))
-    children = [jnp.array(archive[field]) for field in _GENOME_FIELDS]
+    """Reconstruct a Genome from a .npz written by save_genome.
+
+    Rejects seven-field archives from ctrnn_evo: `position` was removed, and
+    since reconstruction is positional a silent load would bind arrays to the
+    wrong fields — weight_matrix landing in edge_mask, and no error.
+    """
+    archive = np.load(str(path))
+    if "position" in archive.files:
+        raise ValueError(
+            f"{path} is a ctrnn_evo genome (7 fields, includes 'position'); "
+            "this package uses 6 and would misalign them"
+        )
+    children = [jnp.array(archive[f]) for f in _GENOME_FIELDS]
     return Genome(*children)
 
 
