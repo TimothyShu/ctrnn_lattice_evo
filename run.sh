@@ -49,7 +49,7 @@ done < <(env -0)
 echo "[run.sh] pwd=$(pwd)"
 echo "[run.sh] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
 echo "[run.sh] python=$(command -v python)"
-echo "[run.sh] ${#ARGS[@]} args from job spec"
+echo "[run.sh] $((${#ARGS[@]} / 2)) params from job spec"
 echo "[run.sh] exec: python scripts/run_experiment.py ${ARGS[*]}"
 
 exec python scripts/run_experiment.py "${ARGS[@]}"
