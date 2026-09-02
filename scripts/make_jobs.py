@@ -71,7 +71,6 @@ params:
   n-evals: {n_evals}
   episode-steps: {episode_steps}
   seed: {seed}
-  output-dir: runs/{name}
 {extra}"""
 
 
@@ -98,7 +97,6 @@ def make_spec(arm: str, frac: float, idx: int, a) -> tuple[str, str]:
         n_evals=a.n_evals,
         episode_steps=a.episode_steps,
         seed=a.seed + 1000 * idx,   # disjoint seed blocks per cell
-        name=name,
         extra=extra,
     )
 
