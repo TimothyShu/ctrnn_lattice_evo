@@ -51,6 +51,7 @@ STAGES = {
 SPEC = """\
 project: ctrnn_lattice_evo
 entrypoint: run.sh
+venv: ~/jax-env
 gpu: auto
 notify: {notify}
 notes: "{notes}"
