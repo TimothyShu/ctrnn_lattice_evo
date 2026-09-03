@@ -66,7 +66,8 @@ from .cost import edge_count_cost, dist_cost, adjusted_fitness
 from .mutation import (
     MutationRates,
     perturb_weights, perturb_tau, perturb_bias,
-    type_flip, add_edge, remove_edges,
+    type_flip, add_edges, remove_edges,
+    count_active_edges,
     mutate,
 )
 
@@ -110,4 +111,10 @@ __all__ = [
     "step_world", "reset_world", "run_episode",
     # controllers
     "random_walk", "nearest_hotspot",
+    # mutation
+    "MutationRates",
+    "perturb_weights", "perturb_tau", "perturb_bias",
+    "type_flip", "add_edges", "remove_edges",
+    "count_active_edges",
+    "mutate",
 ]

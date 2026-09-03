@@ -292,7 +292,7 @@ class Config:
         """Directed pairs excluding self-edges — the density denominator.
 
         Note this is N*(N-1), NOT the lattice mask size: a fresh 8x8 r=2
-        lattice reads as 27% dense, not 100%, and add_edge is unmasked so the
+        lattice reads as 27% dense, not 100%, and add_edges is unmasked so the
         active edge count can exceed the mask.
         """
         return self.N_max * (self.N_max - 1)

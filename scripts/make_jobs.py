@@ -64,7 +64,7 @@ params:
   dist-frac: 0.0
   act-frac: 0.0
   penalty-warmup-gens: {warmup}
-  remove-edge-p-per-edge: {remove_p}
+  edge-churn: {churn}
   n-generations: {gens}
   n-replicates: {reps}
   pop-size: {pop}
@@ -90,7 +90,7 @@ def make_spec(arm: str, frac: float, idx: int, a) -> tuple[str, str]:
         grid_r=a.grid_r,
         frac=frac,
         warmup=a.penalty_warmup_gens,
-        remove_p=a.remove_edge_p,
+        churn=a.edge_churn,
         gens=a.n_generations,
         reps=a.n_replicates,
         pop=a.pop_size,
@@ -114,7 +114,7 @@ def main():
     p.add_argument("--n-evals", type=int, default=5)
     p.add_argument("--episode-steps", type=int, default=2000)
     p.add_argument("--penalty-warmup-gens", type=int, default=100)
-    p.add_argument("--remove-edge-p", type=float, default=0.003)
+    p.add_argument("--edge-churn", type=float, default=0.003)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--dry-run", action="store_true")
     a = p.parse_args()

@@ -5,7 +5,7 @@ run_experiment.py — entry point for one forge-queue job.
 A job is one arm at one penalty setting, run for --n-replicates independent
 seeds.  Each replicate gets its own subdirectory with config.json,
 history.jsonl, checkpoints and best_genome.npz; the job as a whole also emits
-the two artifacts the forge-queue dashboard reads:
+the three artifacts the forge-queue dashboard reads:
 
     series.csv     per-generation traces, aggregated across replicates.
                    contract/state.py parses this with csv.reader and the
@@ -13,6 +13,7 @@ the two artifacts the forge-queue dashboard reads:
                    JSON-lines, and every cell must parseFloat.
     metrics.json   final scalars, shown as a key/value table and used by
                    project_table for cross-job comparison.
+    summary.png    picked up by the gallery (any image under the run dir is).
 
 Output goes to $FORGE_RUN_DIR when set.  run_spec.sh creates that directory on
 NVMe, exports it, and archive.sh moves it to /mnt/archive/<project>/ afterwards
@@ -39,7 +40,7 @@ import numpy as np
 from ctrnn_lattice_evo import Config, WorldConfig
 from ctrnn_lattice_evo.mutation import MutationRates
 from ctrnn_lattice_evo.evolution import run_evolution
-from ctrnn_lattice_evo.logger import make_run_dir, save_config, make_logger
+from ctrnn_lattice_evo.logger import make_run_dir, save_config, make_logger, load_history
 
 # Per-generation traces to export.  First entry is the x axis.
 SERIES_KEYS = [
@@ -97,8 +98,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--tau-sigma", type=float, default=0.1)
     p.add_argument("--bias-sigma", type=float, default=0.1)
     p.add_argument("--type-flip-prob", type=float, default=0.05)
-    p.add_argument("--add-edge-prob", type=float, default=0.1)
-    p.add_argument("--remove-edge-p-per-edge", type=float, default=0.003)
+    p.add_argument("--edge-churn", type=float, default=0.003,
+                   help="one rate drives BOTH edge operators, so add and "
+                        "remove cancel in expectation at any density")
     p.add_argument("--add-node-prob", type=float, default=0.05)
     p.add_argument("--remove-node-prob", type=float, default=0.05)
 
@@ -143,8 +145,7 @@ def build_configs(a: argparse.Namespace):
     rates = MutationRates(
         weight_sigma=a.weight_sigma, tau_sigma=a.tau_sigma,
         bias_sigma=a.bias_sigma, type_flip_prob=a.type_flip_prob,
-        add_edge_prob=a.add_edge_prob,
-        remove_edge_p_per_edge=a.remove_edge_p_per_edge,
+        edge_churn=a.edge_churn,
         add_node_prob=a.add_node_prob, remove_node_prob=a.remove_node_prob,
     )
     return cfg, wcfg, rates
@@ -192,7 +193,7 @@ def write_series_csv(path: Path, stacked: dict[str, np.ndarray]) -> None:
 
 
 def write_metrics_json(path: Path, stacked: dict[str, np.ndarray],
-                       cfg: Config) -> None:
+                       cfg: Config, a: argparse.Namespace) -> None:
     """Final scalars for the dashboard's metrics table and project_table.
 
     Only int/float values are picked up as comparable metrics by
@@ -232,6 +233,48 @@ def write_metrics_json(path: Path, stacked: dict[str, np.ndarray],
     }
     path.write_text(json.dumps(metrics, indent=2))
 
+
+def write_plot(path: Path, stacked: dict[str, np.ndarray], title: str) -> None:
+    """Four-panel PNG; the gallery picks up any image under the run dir.
+
+    Optional — matplotlib is not a hard dependency, and a job should not fail
+    at the very end for want of a plot after hours of compute.
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("[run_experiment] matplotlib not available, skipping plot")
+        return
+
+    panels = [
+        ("max_fitness",         "max fitness"),
+        ("mean_n_edges",        "mean edge count"),
+        ("mean_local_fraction", "mean local fraction"),
+        ("mean_n_active",       "mean active nodes"),
+    ]
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8), sharex=True)
+    gens = np.arange(next(iter(stacked.values())).shape[1])
+
+    for ax, (key, label) in zip(axes.ravel(), panels):
+        arr = stacked[key]
+        mean = np.nanmean(arr, axis=0)
+        ax.plot(gens, mean)
+        if arr.shape[0] > 1:
+            sd = np.nanstd(arr, axis=0)
+            ax.fill_between(gens, mean - sd, mean + sd, alpha=0.2)
+        ax.set_ylabel(label)
+        ax.grid(alpha=0.3)
+
+    axes[1, 0].set_xlabel("generation")
+    axes[1, 1].set_xlabel("generation")
+    fig.suptitle(title)
+    fig.tight_layout()
+    fig.savefig(path, dpi=130)
+    plt.close(fig)
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main(argv=None) -> int:
@@ -244,6 +287,8 @@ def main(argv=None) -> int:
     out_root = Path(a.output_dir or os.environ.get("FORGE_RUN_DIR") or "runs")
     out_root.mkdir(parents=True, exist_ok=True)
 
+    job_name = os.environ.get("FORGE_JOB_NAME", cfg.init_mode)
+
     print(f"[run_experiment] jax devices: {jax.devices()}", flush=True)
     print(f"[run_experiment] output -> {out_root}", flush=True)
     print(f"[run_experiment] arm={cfg.init_mode} "
@@ -251,7 +296,7 @@ def main(argv=None) -> int:
           f"C0_edge={cfg.C0_edge:.0f} C0_dist={cfg.C0_dist:.0f}", flush=True)
     print(f"[run_experiment] edge_frac={cfg.edge_frac} "
           f"dist_frac={cfg.dist_frac} act_frac={cfg.act_frac} "
-          f"remove_edge_p={rates.remove_edge_p_per_edge}", flush=True)
+          f"edge_churn={rates.edge_churn}", flush=True)
 
     if not any(d.platform == "gpu" for d in jax.devices()):
         print("[run_experiment] WARNING: no GPU device visible", flush=True)
@@ -291,7 +336,9 @@ def main(argv=None) -> int:
     # ── Job-level artifacts ──────────────────────────────────────────────────
     stacked = _stack_histories(histories)
     write_series_csv(out_root / "series.csv", stacked)
-    write_metrics_json(out_root / "metrics.json", stacked, cfg)
+    write_metrics_json(out_root / "metrics.json", stacked, cfg, a)
+    write_plot(out_root / "summary.png", stacked,
+               f"{job_name} — {cfg.init_mode}, edge_frac={cfg.edge_frac}")
 
     m = json.loads((out_root / "metrics.json").read_text())
     print(f"\n[run_experiment] {a.n_replicates} reps — "
