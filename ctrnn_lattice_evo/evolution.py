@@ -418,7 +418,7 @@ def run_evolution(
         if state_checkpoint_dir is not None and next_gen % state_checkpoint_every == 0:
             snap_path = state_checkpoint_dir / f"state_gen_{next_gen:06d}.npz"
             save_training_state(snap_path, pop, fitness, steps, key, next_gen,
-                                raw_food=raw_food)
+                                raw_food=raw_food, cfg=cfg)
 
     best_idx = int(jnp.argmax(fitness))
     best_genome = jax.tree_util.tree_map(lambda x: x[best_idx], pop)

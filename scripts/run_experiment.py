@@ -313,7 +313,8 @@ def main(argv=None) -> int:
 
         callback = make_logger(run_dir,
                                checkpoint_every=a.checkpoint_every,
-                               verbose=a.verbose)
+                               verbose=a.verbose,
+                               cfg=cfg)
 
         _best, _fitness, history = run_evolution(
             jax.random.PRNGKey(seed),

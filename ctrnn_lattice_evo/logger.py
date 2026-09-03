@@ -168,16 +168,33 @@ def load_config(run_dir: Path) -> tuple[Config, WorldConfig, MutationRates]:
 
 # ── Genome serialisation ──────────────────────────────────────────────────────
 
-def save_genome(path: str | Path, genome: Genome) -> None:
+def save_genome(path: str | Path, genome: Genome, cfg: Config | None = None) -> None:
     """
     Save all 7 genome fields to a .npz archive.
 
     Field order in the archive matches _GENOME_FIELDS, which is the same
     order as the Genome pytree registration so load_genome can reconstruct
     via Genome(*children) without a dict lookup.
+
+    If cfg is given, also stores the lattice geometry and I/O boundaries
+    (grid_shape, n_in, n_out, neuron_type_names) needed to render the genome
+    without importing this package. load_genome ignores these — they are for
+    external readers going straight through np.load.
     """
     arrays = {field: np.array(getattr(genome, field)) for field in _GENOME_FIELDS}
+    if cfg is not None:
+        arrays.update(_render_meta(cfg))
     np.savez(str(path), **arrays)
+
+
+def _render_meta(cfg: Config) -> dict[str, np.ndarray]:
+    """Lattice geometry and I/O boundaries for external (non-Python) renderers."""
+    return {
+        "grid_shape": np.array([cfg.grid_W, cfg.grid_H], dtype=np.int32),  # [rows, cols]
+        "n_in":  np.int32(cfg.n_in),      # first n_in slots  = sensory neurons
+        "n_out": np.int32(cfg.n_out),     # last  n_out slots = motor neurons
+        "neuron_type_names": np.array(["E", "FSI", "SII"]),
+    }
 
 
 def load_genome(path: str | Path) -> Genome:
@@ -228,6 +245,7 @@ def make_logger(
     run_dir: Path,
     checkpoint_every: int = 100,
     verbose: bool = True,
+    cfg: Config | None = None,
 ) -> Callable[[dict, Genome], None]:
     """
     Return a callback(stats, best_genome) for use with run_evolution.
@@ -243,6 +261,9 @@ def make_logger(
     run_dir          : directory created by make_run_dir
     checkpoint_every : save a named checkpoint every this many generations
     verbose          : print progress to stdout each generation
+    cfg              : if given, saved genomes carry render metadata
+                       (grid_shape, n_in, n_out, neuron_type_names) — see
+                       save_genome
     """
     run_dir = Path(run_dir)
 
@@ -253,12 +274,12 @@ def make_logger(
         append_history(run_dir, stats)
 
         # 2. Overwrite current best
-        save_genome(run_dir / "best_genome.npz", best_genome)
+        save_genome(run_dir / "best_genome.npz", best_genome, cfg=cfg)
 
         # 3. Named checkpoint
         if gen % checkpoint_every == 0:
             ckpt_path = run_dir / "checkpoints" / f"gen_{gen:06d}.npz"
-            save_genome(ckpt_path, best_genome)
+            save_genome(ckpt_path, best_genome, cfg=cfg)
 
         # 4. Progress line
         if verbose:
@@ -283,6 +304,7 @@ def save_training_state(
     key: "jax.Array",
     generation: int,
     raw_food: "jax.Array | None" = None,
+    cfg: Config | None = None,
 ) -> None:
     """
     Save the complete training state needed to resume an interrupted run.
@@ -296,6 +318,8 @@ def save_training_state(
       • rng_key  [2]        — current JAX PRNGKey
       • generation          — the generation number that will be collected NEXT
                              (i.e. the generation about to run when you resume)
+      • grid_shape/n_in/n_out/neuron_type_names — only if cfg is given; see
+                             save_genome / _render_meta
 
     Typical filename: ``checkpoints/state_gen_{N:06d}.npz``
 
@@ -318,6 +342,8 @@ def save_training_state(
     arrays["generation"] = np.array(generation, dtype=np.int64)
     if raw_food is not None:
         arrays["raw_food"] = np.array(raw_food)
+    if cfg is not None:
+        arrays.update(_render_meta(cfg))
 
     np.savez(str(path), **arrays)
 
