@@ -18,6 +18,7 @@ from ctrnn_lattice_evo.topology import (
     local_mask,
     expected_edges,
     reference_costs,
+    distance_kernel,
 )
 
 
@@ -298,3 +299,48 @@ def test_reference_costs_reject_legacy_constants():
  
 def test_reference_costs_square_default_matches_explicit_h():
     assert reference_costs(8, 2) == reference_costs(8, 2, 8)
+
+
+# ── distance_kernel ────────────────────────────────────────────────────────────
+
+def test_distance_kernel_shape():
+    assert distance_kernel(4, 1.0).shape == (16, 16)
+    assert distance_kernel(4, 1.0, 8).shape == (32, 32)
+
+
+def test_distance_kernel_zero_diagonal():
+    k = distance_kernel(8, 1.0)
+    assert jnp.all(jnp.diag(k) == 0.0)
+
+
+def test_distance_kernel_decays_with_distance():
+    """A closer pair must never be weighted below a farther one."""
+    k = distance_kernel(8, 1.0)
+    d = dist_matrix(8)
+    assert float(k[0, 1]) > float(k[0, 2]) > float(k[0, 7])
+    assert float(k[0, 1]) == pytest.approx(float(jnp.exp(-d[0, 1])))
+
+
+def test_distance_kernel_nonnegative():
+    assert jnp.all(distance_kernel(8, 0.5) >= 0.0)
+
+
+@pytest.mark.parametrize("r_lambda", [None, 0.0, -1.0, float("inf")])
+def test_distance_kernel_uniform_cases(r_lambda):
+    """<= 0, None and inf all mean 'uniform addition' — every off-diagonal
+    pair gets the same weight."""
+    k = distance_kernel(8, r_lambda)
+    off_diag = k[~jnp.eye(64, dtype=bool)]
+    assert jnp.all(off_diag == off_diag[0])
+    assert float(off_diag[0]) == 1.0
+
+
+def test_distance_kernel_smaller_lambda_concentrates_more():
+    """A tighter e-folding reach must weight a fixed near pair relatively
+    higher against a fixed far pair."""
+    tight = distance_kernel(8, 0.5)
+    loose = distance_kernel(8, 4.0)
+    near, far = (0, 1), (0, 7)   # distance 1 vs distance 7
+    ratio_tight = float(tight[near]) / float(tight[far])
+    ratio_loose = float(loose[near]) / float(loose[far])
+    assert ratio_tight > ratio_loose

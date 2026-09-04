@@ -27,7 +27,7 @@ import pytest
 
 from ctrnn_lattice_evo import Config, E, SII
 from ctrnn_lattice_evo.genome import grid_genome, sparse_genome, validate_genome
-from ctrnn_lattice_evo.topology import local_mask
+from ctrnn_lattice_evo.topology import local_mask, dist_matrix, distance_kernel
 from ctrnn_lattice_evo import mutation as M
 from ctrnn_lattice_evo.mutation import (
     MutationRates,
@@ -228,6 +228,63 @@ def test_add_edges_only_between_active_neurons(cfg_sparse):
     for idx in inactive[:5]:
         assert not bool(out.edge_mask[idx].any())
         assert not bool(out.edge_mask[:, idx].any())
+
+
+def test_add_edges_log_kernel_none_matches_default(g, cfg):
+    """Passing log_kernel=None explicitly must be identical to omitting it —
+    both take the plain _pick_n path."""
+    a = add_edges(jax.random.PRNGKey(60), g, cfg, p_per_edge=0.2)
+    b = add_edges(jax.random.PRNGKey(60), g, cfg, p_per_edge=0.2, log_kernel=None)
+    assert jnp.array_equal(a.edge_mask, b.edge_mask)
+
+
+def test_add_edges_log_kernel_biases_toward_local(g, cfg):
+    """With a tight kernel, edges added over many trials should land closer
+    (in Chebyshev distance) on average than with uniform proposal."""
+    d = dist_matrix(cfg.grid_W, cfg.grid_H)
+    kernel = distance_kernel(cfg.grid_W, 0.5, cfg.grid_H)
+    log_kernel = jnp.where(kernel > 0, jnp.log(kernel), -jnp.inf)
+
+    def mean_new_edge_distance(log_k):
+        total_d, total_n = 0.0, 0
+        for i in range(40):
+            key = jax.random.fold_in(jax.random.PRNGKey(61), i)
+            out = add_edges(key, g, cfg, p_per_edge=0.3, log_kernel=log_k)
+            new = out.edge_mask & ~g.edge_mask
+            total_d += float(jnp.sum(jnp.where(new, d, 0.0)))
+            total_n += int(new.sum())
+        return total_d / total_n
+
+    biased = mean_new_edge_distance(log_kernel)
+    uniform = mean_new_edge_distance(None)
+    assert biased < uniform
+
+
+def test_add_edges_log_kernel_never_creates_self_edge(g, cfg):
+    kernel = distance_kernel(cfg.grid_W, 1.0, cfg.grid_H)
+    log_kernel = jnp.where(kernel > 0, jnp.log(kernel), -jnp.inf)
+    gg = g
+    for i in range(30):
+        gg = add_edges(jax.random.fold_in(jax.random.PRNGKey(62), i), gg, cfg,
+                       p_per_edge=0.1, log_kernel=log_kernel)
+    assert not jnp.any(jnp.diag(gg.edge_mask))
+
+
+def test_mutate_accepts_log_kernel(g, cfg, rates):
+    kernel = distance_kernel(cfg.grid_W, 1.0, cfg.grid_H)
+    log_kernel = jnp.where(kernel > 0, jnp.log(kernel), -jnp.inf)
+    out = mutate(jax.random.PRNGKey(63), g, cfg, rates, log_kernel=log_kernel)
+    assert validate_genome(out, cfg)
+
+
+def test_mutate_is_vmappable_with_log_kernel(g, cfg, rates):
+    kernel = distance_kernel(cfg.grid_W, 1.0, cfg.grid_H)
+    log_kernel = jnp.where(kernel > 0, jnp.log(kernel), -jnp.inf)
+    keys = jax.random.split(jax.random.PRNGKey(64), 8)
+    batch = jax.tree_util.tree_map(lambda x: jnp.stack([x] * 8), g)
+    out = jax.vmap(mutate, in_axes=(0, 0, None, None, None))(
+        keys, batch, cfg, rates, log_kernel)
+    assert out.weight_matrix.shape == (8, cfg.N_max, cfg.N_max)
 
 
 def test_explicit_n_edges_overrides_measurement(g, cfg):

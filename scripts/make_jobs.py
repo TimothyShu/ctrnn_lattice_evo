@@ -63,6 +63,7 @@ params:
   edge-frac: {frac}
   dist-frac: 0.0
   act-frac: 0.0
+  add-kernel-lambda: {add_kernel_lambda}
   penalty-warmup-gens: {warmup}
   edge-churn: {churn}
   n-generations: {gens}
@@ -89,6 +90,7 @@ def make_spec(arm: str, frac: float, idx: int, a) -> tuple[str, str]:
         grid_w=a.grid_w,
         grid_r=a.grid_r,
         frac=frac,
+        add_kernel_lambda=a.add_kernel_lambda,
         warmup=a.penalty_warmup_gens,
         churn=a.edge_churn,
         gens=a.n_generations,
@@ -115,6 +117,7 @@ def main():
     p.add_argument("--episode-steps", type=int, default=2000)
     p.add_argument("--penalty-warmup-gens", type=int, default=100)
     p.add_argument("--edge-churn", type=float, default=0.003)
+    p.add_argument("--add-kernel-lambda", type=float, default=0.0)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--dry-run", action="store_true")
     a = p.parse_args()

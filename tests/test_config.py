@@ -190,6 +190,35 @@ def test_negative_frac_rejected():
         Config(N_max=16, grid_W=4, grid_H=4, edge_frac=-0.1)
 
 
+# ── Addition distance kernel ─────────────────────────────────────────────────
+
+def test_add_kernel_lambda_defaults_to_uniform():
+    assert Config(N_max=16, grid_W=4, grid_H=4).add_kernel_lambda == 0.0
+
+
+def test_add_kernel_lambda_accepts_positive_finite():
+    cfg = Config(N_max=16, grid_W=4, grid_H=4, add_kernel_lambda=1.0)
+    assert cfg.add_kernel_lambda == pytest.approx(1.0)
+
+
+def test_add_kernel_lambda_accepts_inf():
+    """inf is a legal 'uniform, but explicit' value alongside 0."""
+    cfg = Config(N_max=16, grid_W=4, grid_H=4, add_kernel_lambda=float("inf"))
+    assert cfg.add_kernel_lambda == float("inf")
+
+
+def test_negative_add_kernel_lambda_rejected():
+    """distance_kernel's own <= 0 guard would silently fold a negative value
+    into 'uniform' — reject it here instead of hiding a typo."""
+    with pytest.raises((AssertionError, ValueError)):
+        Config(N_max=16, grid_W=4, grid_H=4, add_kernel_lambda=-0.5)
+
+
+def test_nan_add_kernel_lambda_rejected():
+    with pytest.raises((AssertionError, ValueError)):
+        Config(N_max=16, grid_W=4, grid_H=4, add_kernel_lambda=float("nan"))
+
+
 # ── Init mode ────────────────────────────────────────────────────────────────
 
 def test_init_mode_defaults_to_grid():

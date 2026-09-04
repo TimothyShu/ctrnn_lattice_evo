@@ -123,6 +123,23 @@ def _pick_n(key: jax.Array, eligible: jnp.ndarray, n: jnp.ndarray) -> jnp.ndarra
     return chosen.reshape(eligible.shape) & eligible
 
 
+def _pick_n_weighted(key: jax.Array, eligible: jnp.ndarray, n: jnp.ndarray,
+                     log_w: jnp.ndarray) -> jnp.ndarray:
+    """Top-n of (log_w + Gumbel) ~ sampling n slots without replacement with
+    probability proportional to exp(log_w), restricted to `eligible`.
+
+    log_w is a fixed [N, N] array (log of the addition kernel). Passing
+    log_w = 0 everywhere recovers uniform sampling, distributionally
+    equivalent to _pick_n.
+    """
+    g = -jnp.log(-jnp.log(jax.random.uniform(key, eligible.shape) + 1e-20) + 1e-20)
+    score = jnp.where(eligible, log_w + g, -jnp.inf)
+    order = jnp.argsort(-score.ravel())
+    take = jnp.arange(order.shape[0]) < n
+    chosen = jnp.zeros(order.shape, dtype=bool).at[order].set(take)
+    return chosen.reshape(eligible.shape) & eligible
+
+
 # ── Continuous parameter mutations ────────────────────────────────────────────
 
 def perturb_weights(key: jax.Array, genome: Genome, cfg: Config, *,
@@ -180,7 +197,8 @@ def type_flip(key: jax.Array, genome: Genome, cfg: Config, *,
 # ── Edge operators ────────────────────────────────────────────────────────────
 
 def add_edges(key: jax.Array, genome: Genome, cfg: Config, *,
-              p_per_edge: float, n_edges: jnp.ndarray | None = None) -> Genome:
+              p_per_edge: float, n_edges: jnp.ndarray | None = None,
+              log_kernel: jnp.ndarray | None = None) -> Genome:
     """Add ~p_per_edge * n_edges new edges at uniformly chosen empty slots.
 
     `n_edges` is the PRE-MUTATION edge count.  Pass the same value to
@@ -193,12 +211,15 @@ def add_edges(key: jax.Array, genome: Genome, cfg: Config, *,
     stochastic like removal; a deterministic count would pair a fixed
     addition against a Binomial removal and bias the walk.
 
-    DELIBERATELY UNMASKED with respect to the lattice: locality is the
-    initialisation, not a ceiling, and the distance penalty decides whether a
-    long-range edge earns its keep.  Note the consequence — removals come out
-    of the current topology while additions land anywhere, so a lattice loses
-    local edges and gains mostly non-local ones.  local_fraction declines even
-    with edge count flat, which is why it is logged per generation.
+    STILL UNMASKED with respect to the lattice: there is no hard ceiling on
+    which slot pairs may be proposed, and the distance penalty (dist_frac)
+    still decides whether a long-range edge earns its keep after the fact.
+    `log_kernel`, when given, adds a SOFT prior on top — a fixed [N, N] array
+    (log of topology.distance_kernel) that biases which of the eligible pairs
+    get proposed, without excluding any of them outright. None recovers
+    today's exactly-uniform proposal.  See Config.add_kernel_lambda for why
+    selection alone (dist_frac) cannot hold locality against uniform
+    additions.
 
     New weights are strictly positive: a zero-weight edge is invisible to
     selection and would be removed again before it could ever be evaluated.
@@ -210,7 +231,10 @@ def add_edges(key: jax.Array, genome: Genome, cfg: Config, *,
 
     eligible = _active_pairs(genome) & ~genome.edge_mask & _no_self(cfg)
     n_add = jax.random.poisson(k_n, p_per_edge * n_edges.astype(jnp.float32))
-    new = _pick_n(k_pick, eligible, n_add)
+    if log_kernel is None:
+        new = _pick_n(k_pick, eligible, n_add)
+    else:
+        new = _pick_n_weighted(k_pick, eligible, n_add, log_kernel)
 
     w = jnp.abs(jax.random.normal(k_w, eligible.shape)) * 0.5 + 0.01
     return replace(
@@ -320,7 +344,7 @@ def remove_node(key: jax.Array, genome: Genome, cfg: Config) -> Genome:
 # ── Combined operator ─────────────────────────────────────────────────────────
 
 def mutate(key: jax.Array, genome: Genome, cfg: Config,
-           rates: MutationRates) -> Genome:
+           rates: MutationRates, log_kernel: jnp.ndarray | None = None) -> Genome:
     """Apply every mutation operator in sequence.
 
     The edge count E is measured ONCE, before either edge operator runs, and
@@ -329,6 +353,12 @@ def mutate(key: jax.Array, genome: Genome, cfg: Config,
     density and independent of ordering.  Recomputing E inside each operator
     would let the second see the first's effect and introduce a small
     systematic drift.
+
+    log_kernel, when given, is forwarded to add_edges only — remove_edges
+    stays uniform, since the goal is to bias which edges get PROPOSED, not to
+    protect existing ones from removal.  It is a fixed [N, N] array shared by
+    the whole population, so callers vmapping mutate should pass it with
+    in_axes=None (like cfg and rates) rather than mapping over it.
 
     Node operators run only when cfg.node_ops_enabled, which Config restricts
     to the sparse arm.  The gate is a plain Python `if` on a static config
@@ -343,7 +373,8 @@ def mutate(key: jax.Array, genome: Genome, cfg: Config,
     g = type_flip(      k[3], g,      cfg, flip_prob=rates.type_flip_prob)
 
     n_edges = count_active_edges(g)          # measured once, shared by both
-    g = add_edges(   k[4], g, cfg, p_per_edge=rates.edge_churn, n_edges=n_edges)
+    g = add_edges(   k[4], g, cfg, p_per_edge=rates.edge_churn, n_edges=n_edges,
+                     log_kernel=log_kernel)
     g = remove_edges(k[5], g, cfg, p_per_edge=rates.edge_churn, n_edges=n_edges)
 
     if cfg.node_ops_enabled:

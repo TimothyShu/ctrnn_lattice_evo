@@ -36,7 +36,7 @@ from .config import Config
 from .genome import Genome, constructor_for
 from .mutation import MutationRates, mutate
 from .cost import edge_count_cost, dist_cost, adjusted_fitness
-from .topology import dist_matrix, local_mask
+from .topology import dist_matrix, local_mask, distance_kernel
 from .world import WorldConfig
 from .brain import run_brain_episode_full
 from .logger import save_training_state, load_training_state
@@ -233,11 +233,13 @@ def reproduce(
     parent_idxs: jnp.ndarray,
     rates: MutationRates,
     cfg: Config,
+    log_kernel: jnp.ndarray | None = None,
 ) -> Genome:
     """Gather the selected parents and mutate each into an offspring."""
     offspring = jax.tree_util.tree_map(lambda x: x[parent_idxs], pop_genomes)
     mut_keys = jax.random.split(key, cfg.population_size)
-    return jax.vmap(mutate, in_axes=(0, 0, None, None))(mut_keys, offspring, cfg, rates)
+    return jax.vmap(mutate, in_axes=(0, 0, None, None, None))(
+        mut_keys, offspring, cfg, rates, log_kernel)
 
 
 # ── One generation ────────────────────────────────────────────────────────────
@@ -257,6 +259,13 @@ def evolve_step(
     the weights — a well-pruned elite must not be silently rewired each
     generation.
 
+    The addition kernel (Config.add_kernel_lambda) depends only on the
+    lattice, never on a genome, so it is built once here — like dist/local
+    are for collect_stats — rather than inside the population vmap in
+    reproduce, which would recompute it once per genome instead of once per
+    generation. 0 and inf both mean uniform addition and take the cheap
+    log_kernel=None path through add_edges (see distance_kernel).
+
     Returns the new, unevaluated offspring population.
     """
     k_sel, k_mut = jax.random.split(key)
@@ -270,8 +279,13 @@ def evolve_step(
             bias_sigma=rates.bias_sigma * scale,
         )
 
+    log_kernel = None
+    if 0.0 < cfg.add_kernel_lambda < float("inf"):
+        kernel = distance_kernel(cfg.grid_W, cfg.add_kernel_lambda, cfg.grid_H)
+        log_kernel = jnp.where(kernel > 0, jnp.log(kernel), -jnp.inf)
+
     parent_idxs = select_parents(k_sel, fitness, cfg.population_size, cfg.tournament_size)
-    offspring = reproduce(k_mut, pop_genomes, parent_idxs, rates, cfg)
+    offspring = reproduce(k_mut, pop_genomes, parent_idxs, rates, cfg, log_kernel=log_kernel)
 
     best_idx = jnp.argmax(fitness)
     elite = jax.tree_util.tree_map(lambda x: x[best_idx], pop_genomes)

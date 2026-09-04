@@ -82,6 +82,29 @@ class Config:
     dist_frac: float = 0.0
     act_frac:  float = 0.0
 
+    # Addition distance kernel: new edges land at slot pairs with probability
+    # proportional to exp(-d / add_kernel_lambda), d = Chebyshev distance.
+    #
+    # This is the SECOND channel for locality, distinct from dist_frac.
+    # dist_frac lets SELECTION discourage long edges after they exist; the
+    # kernel biases the OPERATOR so long edges are rarely proposed in the
+    # first place.  The gate4 runs showed selection alone cannot hold locality
+    # against uniform additions (~3.3 non-local edges arrive per generation
+    # against 1092, faster than selection can prune), so the prior has to act
+    # at proposal time.
+    #
+    # <= 0 or inf means uniform addition (the gate1-3 behaviour).  Finite
+    # values pull the equilibrium local fraction up:
+    #   lambda   equilibrium local frac (d<=2, E=1092)
+    #   inf      0.271   (the random-graph floor)
+    #   2.0      0.479
+    #   1.0      0.633
+    #   0.7      0.720
+    #   0.5      0.795
+    # 1.0 is unreachable: 1092 edges cannot all fit the 1092 local slots
+    # without overflow as they fill.
+    add_kernel_lambda: float = 0.0     # 0 => uniform (no bias)
+
     # Reference costs (the denominators above).  Leave as None to derive from
     # the lattice in __post_init__ via topology.reference_costs — that is the
     # single definition, and Config's job is to hold and serialise the result,
@@ -203,6 +226,13 @@ class Config:
             raise ValueError(
                 f"node_ops_enabled requires init_mode='sparse', got "
                 f"{self.init_mode!r} — remove_node would deactivate lattice sites"
+            )
+        if self.add_kernel_lambda < 0.0 or self.add_kernel_lambda != self.add_kernel_lambda:
+            raise ValueError(
+                f"add_kernel_lambda must be >= 0, got {self.add_kernel_lambda}. "
+                "0 means uniform addition (disabled) — a negative reach is "
+                "meaningless and would otherwise silently fold into 'uniform' "
+                "via distance_kernel's own <= 0 guard, hiding a typo."
             )
 
     def _validate_io(self):

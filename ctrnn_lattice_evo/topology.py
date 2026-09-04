@@ -37,6 +37,25 @@ def expected_edges(W: int, r: int, H: int | None = None) -> int:
 
     return _A(W) * _A(H) - W * H
 
+def distance_kernel(W: int, r_lambda: float | None, H: int | None = None) -> jnp.ndarray:
+    """Unnormalised per-slot addition weight: exp(-d / r_lambda), 0 on the
+    diagonal.
+
+    r_lambda is in LATTICE UNITS, so it means the same thing across grid
+    sizes: the e-folding reach of a new edge.  r_lambda = inf (or <= 0 by
+    convention) recovers uniform addition, which is the current behaviour and
+    the natural control point.
+
+    Computed ONCE per run — it depends only on the lattice, never on a genome.
+    """
+    d = dist_matrix(W, H)
+    if r_lambda is None or r_lambda <= 0 or not jnp.isfinite(jnp.asarray(r_lambda)):
+        w = jnp.ones_like(d)
+    else:
+        w = jnp.exp(-d / r_lambda)
+    return jnp.where(d > 0, w, 0.0)     # no self-edges
+
+
 def reference_costs(W: int, r: int, H: int | None = None) -> tuple[float, float]:
     m = local_mask(W, r, H)
     d = dist_matrix(W, H)

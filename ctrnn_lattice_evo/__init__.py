@@ -32,6 +32,7 @@ from .topology import (
     local_mask,
     expected_edges,
     reference_costs,
+    distance_kernel,
 )
 
 from .genome import (
@@ -100,7 +101,7 @@ __all__ = [
     "Config", "INIT_MODES", "FITNESS_MODES",
     # topology
     "grid_coords", "dist_matrix", "local_mask",
-    "expected_edges", "reference_costs",
+    "expected_edges", "reference_costs", "distance_kernel",
     # genome
     "Genome", "E", "FSI", "SII",
     "grid_genome", "uniform_genome", "sparse_genome",

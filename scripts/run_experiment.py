@@ -77,6 +77,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--act-frac", type=float, default=0.0)
     p.add_argument("--c0-edge", type=float, default=None)
     p.add_argument("--c0-dist", type=float, default=None)
+    p.add_argument("--add-kernel-lambda", type=float, default=0.0,
+                   help="e-folding reach (lattice units) of the add_edges "
+                        "proposal kernel; 0 = uniform addition (disabled)")
 
     # ── Penalty schedule ─────────────────────────────────────────────────────
     p.add_argument("--penalty-warmup-gens", type=int, default=0)
@@ -128,6 +131,7 @@ def build_configs(a: argparse.Namespace):
         init_edge_density=a.init_edge_density,
         node_ops_enabled=a.node_ops_enabled,
         edge_frac=a.edge_frac, dist_frac=a.dist_frac, act_frac=a.act_frac,
+        add_kernel_lambda=a.add_kernel_lambda,
         C0_edge=a.c0_edge, C0_dist=a.c0_dist,
         penalty_warmup_gens=a.penalty_warmup_gens,
         mutation_warmup_scale=a.mutation_warmup_scale,
@@ -228,6 +232,7 @@ def write_metrics_json(path: Path, stacked: dict[str, np.ndarray],
         "edge_frac":           float(cfg.edge_frac),
         "dist_frac":           float(cfg.dist_frac),
         "act_frac":            float(cfg.act_frac),
+        "add_kernel_lambda":   float(cfg.add_kernel_lambda),
         "grid_r":              int(cfg.grid_r),
         "init_mode":           cfg.init_mode,
     }
