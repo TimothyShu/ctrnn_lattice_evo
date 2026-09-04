@@ -426,6 +426,67 @@ class TestEnergyEconomics:
             f"With metabolism=0.005 agent should survive ≥80 steps, got {steps}"
         )
 
+    def test_metabolism_drain_scales_with_n_food_types(self):
+        """
+        Each energy pool drains independently at the SAME shared rate
+        regardless of n_food_types, and survival requires every pool to stay
+        above zero -- so raising n_food_types multiplies difficulty instead
+        of just adding independent sub-tasks.  The per-type drain should
+        instead be divided by n_food_types, holding the total metabolic
+        budget roughly constant as T grows: half the per-type drain at T=2,
+        a third at T=3.
+        """
+        def drain_per_type(n_food_types: int) -> float:
+            wcfg = WorldConfig(n_food_types=n_food_types)
+            state = reset_world(jax.random.PRNGKey(0), wcfg)
+            barren = WorldState(
+                agent_pos=jnp.array([0.0, 0.0]),
+                agent_energy=jnp.full((wcfg.n_food_types,), 0.5),
+                hotspot_pos=jnp.full(
+                    (wcfg.n_food_types, wcfg.n_food, 2), wcfg.arena_size * 10),
+                step=state.step,
+                rng_key=state.rng_key,
+            )
+            s2 = step_world(barren, jnp.zeros(2), wcfg)
+            return 0.5 - float(s2.agent_energy[0])
+
+        d1 = drain_per_type(1)
+        d2 = drain_per_type(2)
+        d3 = drain_per_type(3)
+
+        assert d2 == pytest.approx(d1 / 2, rel=1e-4), (
+            f"2 food types should halve per-type drain: d1={d1}, d2={d2}"
+        )
+        assert d3 == pytest.approx(d1 / 3, rel=1e-4), (
+            f"3 food types should divide per-type drain by 3: d1={d1}, d3={d3}"
+        )
+
+    def test_movement_cost_drain_scales_with_n_food_types(self):
+        """The move_cost component of drain must also divide by
+        n_food_types, not just metabolism -- it's a shared search cost, not
+        attributable to any one food type."""
+        def moving_drain_per_type(n_food_types: int) -> float:
+            wcfg = WorldConfig(n_food_types=n_food_types)
+            state = reset_world(jax.random.PRNGKey(0), wcfg)
+            barren = WorldState(
+                agent_pos=jnp.array([50.0, 50.0]),
+                agent_energy=jnp.full((wcfg.n_food_types,), 0.5),
+                hotspot_pos=jnp.full(
+                    (wcfg.n_food_types, wcfg.n_food, 2), wcfg.arena_size * 10),
+                step=state.step,
+                rng_key=state.rng_key,
+            )
+            s2 = step_world(barren, jnp.ones(2), wcfg)
+            return 0.5 - float(s2.agent_energy[0])
+
+        d1 = moving_drain_per_type(1)
+        d2 = moving_drain_per_type(2)
+
+        assert d2 == pytest.approx(d1 / 2, rel=1e-4), (
+            f"2 food types should halve total (metabolism + move_cost) "
+            f"per-type drain: d1={d1}, d2={d2}"
+        )
+
     def test_smaller_hotspot_sigma_reduces_coverage(self):
         """
         A smaller sigma should give significantly less food reward at the

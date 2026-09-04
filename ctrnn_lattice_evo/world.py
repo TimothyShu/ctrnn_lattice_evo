@@ -132,7 +132,11 @@ def step_world(
     Boundary: reflective clamp (agent cannot leave the arena).
 
     Each energy type is replenished only by its own hotspots.
-    Metabolism and movement cost drain all energy types equally.
+    Metabolism and movement cost are a shared drain BUDGET, split evenly
+    across energy types rather than charged in full to each. Since survival
+    requires every type to stay above zero, charging the full T=1 rate to
+    each of T independently-draining pools would multiply difficulty with
+    n_food_types instead of just adding independent sub-tasks.
     The agent is alive only while ALL energy types are > 0.
     """
     # --- Physics ---
@@ -141,7 +145,9 @@ def step_world(
     new_pos = jnp.clip(state.agent_pos + v, 0.0, wcfg.arena_size)
 
     # --- Energy (per type via vmap) ---
-    lost = wcfg.metabolism + wcfg.move_cost * speed  # shared drain applied to each type
+    # Shared drain budget, divided across types so it stays roughly constant
+    # in total as n_food_types grows.
+    lost = (wcfg.metabolism + wcfg.move_cost * speed) / wcfg.n_food_types
 
     def update_energy(energy_i: jnp.ndarray, hotspot_pos_i: jnp.ndarray) -> jnp.ndarray:
         food_norm = jnp.clip(food_at(new_pos, hotspot_pos_i, wcfg), 0.0, 1.0)
